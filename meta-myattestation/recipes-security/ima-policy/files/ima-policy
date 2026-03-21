@@ -1,0 +1,16 @@
+# Focused Linux IMA Measurement Policy for Runtime Integrity
+# Measures executed binaries and memory-mapped executable libraries into PCR[10]
+
+# Do not measure virtual/pseudo filesystems
+dont_measure fsmagic=0x9fa0
+dont_measure fsmagic=0x62656573
+dont_measure fsmagic=0x73636173
+dont_measure fsmagic=0x01021994
+dont_measure fsmagic=0x858458f6
+dont_measure fsmagic=0x1cd1
+
+# Measure binary executions (BPRM) into PCR[10] using ima-ng template
+measure func=BPRM_CHECK template=ima-ng pcr=10
+
+# Measure memory-mapped executables (shared libraries) into PCR[10]
+measure func=MMAP_CHECK mask=MAY_EXEC template=ima-ng pcr=10
