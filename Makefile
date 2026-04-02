@@ -1,12 +1,14 @@
 SHELL := /bin/sh
 
-.PHONY: help start-tpm stop-tpm run-qemu
+.PHONY: help start-tpm stop-tpm run-qemu verify-clean verify-tampered
 
 help:
 	@echo "Targets:"
 	@echo "  make start-tpm       Start swtpm"
 	@echo "  make stop-tpm        Stop swtpm"
-	@echo "  make run-qemu        Boot QEMU using QEMU_KERNEL and QEMU_ROOTFS"
+	@echo "  make run-qemu        Boot QEMU using QEMU_KERNEL/QEMU_UBOOT and QEMU_ROOTFS"
+	@echo "  make verify-clean    Verify results/clean against results/expected_pcr8.txt"
+	@echo "  make verify-tampered Verify results/tampered against results/expected_pcr8.txt"
 
 start-tpm:
 	./scripts/start-swtpm.sh
@@ -16,3 +18,23 @@ stop-tpm:
 
 run-qemu:
 	./scripts/run-qemu.sh
+
+verify-clean:
+	python3 verifier/verify_quote.py \
+	  --nonce results/clean/nonce.hex \
+	  --ak-pub results/clean/ak.pub \
+	  --quote results/clean/quote.msg \
+	  --sig results/clean/quote.sig \
+	  --pcrs results/clean/pcrs.out \
+	  --pcr8-text results/clean/pcr8.txt \
+	  --expected-pcr8 results/expected_pcr8.txt
+
+verify-tampered:
+	python3 verifier/verify_quote.py \
+	  --nonce results/tampered/nonce.hex \
+	  --ak-pub results/tampered/ak.pub \
+	  --quote results/tampered/quote.msg \
+	  --sig results/tampered/quote.sig \
+	  --pcrs results/tampered/pcrs.out \
+	  --pcr8-text results/tampered/pcr8.txt \
+	  --expected-pcr8 results/expected_pcr8.txt
