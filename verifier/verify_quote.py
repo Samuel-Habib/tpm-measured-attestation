@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Host-side verifier for TPM quote artifacts.
+Host-side verifier for TPM quote artifacts and Linux IMA runtime measurement log replay.
 
-This verifier performs two checks:
-
-1. It calls tpm2_checkquote to verify the TPM quote signature and nonce binding.
-2. It compares the observed PCR[8] value against the expected clean baseline.
-
-The script intentionally relies on tpm2-tools for TPM quote parsing because TPM quote
-structures are binary TPM2B_ATTEST objects and should not be hand-parsed in a course
-prototype unless necessary.
+This verifier performs:
+1. TPM quote signature and freshness (nonce) verification via tpm2_checkquote.
+2. Boot measurement baseline verification (PCR[8] comparison).
+3. Linux IMA runtime measurement log replay (recomputing cumulative PCR[10] hash from
+   the ASCII measurement log and comparing it against the quoted/observed PCR[10]).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import shutil
 import subprocess
@@ -22,7 +20,7 @@ import sys
 from pathlib import Path
 
 
-HEX_64_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
+HEX_64_RE = re.compile(r"(?:0x)?([a-fA-F0-9]{64})")
 
 
 def read_text(path: Path) -> str:
@@ -36,7 +34,7 @@ def normalize_hex(value: str) -> str:
     return "".join(value.split()).lower()
 
 
-def parse_pcr8_value(path: Path) -> str:
+def parse_pcr_value(path: Path) -> str:
     text = read_text(path)
     matches = HEX_64_RE.findall(text)
 
@@ -48,7 +46,7 @@ def parse_pcr8_value(path: Path) -> str:
 
 def check_required_file(path: Path) -> None:
     if not path.exists():
-        raise SystemExit(f"Missing file: {path}")
+        raise SystemExit(f"Missing required file: {path}")
 
 
 def run_tpm2_checkquote(
@@ -98,9 +96,53 @@ def run_tpm2_checkquote(
     print("PASS: quote signature check completed")
 
 
+def replay_ima_log(log_path: Path, target_pcr: int = 10, hash_alg: str = "sha256") -> tuple[str, int]:
+    """
+    Replays the ASCII IMA runtime measurement log by recalculating:
+      PCR_new = HASH(PCR_current || template_digest)
+    Starting from an all-zero initial digest for PCR[target_pcr].
+    Returns (replayed_pcr_hex, event_count).
+    """
+    if hash_alg != "sha256":
+        raise ValueError(f"Unsupported hash algorithm for IMA replay: {hash_alg}")
+
+    current_pcr = b"\x00" * 32
+    event_count = 0
+
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    for line_num, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+
+        tokens = line.split()
+        if len(tokens) < 3:
+            continue
+
+        try:
+            pcr_idx = int(tokens[0])
+        except ValueError:
+            continue
+
+        if pcr_idx != target_pcr:
+            continue
+
+        template_hash_hex = tokens[1]
+        if not re.fullmatch(r"[a-fA-F0-9]{64}", template_hash_hex):
+            print(f"Warning: line {line_num} has non-sha256 template hash '{template_hash_hex}', skipping")
+            continue
+
+        template_digest = bytes.fromhex(template_hash_hex)
+        current_pcr = hashlib.sha256(current_pcr + template_digest).digest()
+        event_count += 1
+
+    return current_pcr.hex(), event_count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify TPM quote artifacts against a nonce and expected PCR[8]."
+        description="Verify TPM quote artifacts against a nonce, expected PCR baseline, and IMA log."
     )
 
     parser.add_argument("--nonce", required=True, type=Path, help="File containing nonce hex")
@@ -110,11 +152,14 @@ def main() -> int:
     parser.add_argument("--pcrs", required=True, type=Path, help="pcrs.out from tpm2_quote")
     parser.add_argument("--pcr8-text", required=True, type=Path, help="Text output from tpm2_pcrread sha256:8")
     parser.add_argument("--expected-pcr8", required=True, type=Path, help="Expected clean PCR[8] baseline")
+    parser.add_argument("--ima-log", type=Path, help="Optional /sys/kernel/security/ima/ascii_runtime_measurements file")
+    parser.add_argument("--pcr10-text", type=Path, help="Optional text output from tpm2_pcrread sha256:10")
+    parser.add_argument("--expected-pcr10", type=Path, help="Optional expected PCR[10] baseline")
     parser.add_argument("--hash-alg", default="sha256", help="Quote hash algorithm. Default: sha256")
 
     args = parser.parse_args()
 
-    for path in [
+    required_files = [
         args.nonce,
         args.ak_pub,
         args.quote,
@@ -122,12 +167,13 @@ def main() -> int:
         args.pcrs,
         args.pcr8_text,
         args.expected_pcr8,
-    ]:
+    ]
+    for path in required_files:
         check_required_file(path)
 
     nonce_hex = normalize_hex(read_text(args.nonce))
     expected_pcr8 = normalize_hex(read_text(args.expected_pcr8))
-    observed_pcr8 = parse_pcr8_value(args.pcr8_text)
+    observed_pcr8 = parse_pcr_value(args.pcr8_text)
 
     if not re.fullmatch(r"[a-f0-9]+", nonce_hex):
         raise SystemExit("Nonce file must contain hex characters only.")
@@ -151,6 +197,32 @@ def main() -> int:
         return 1
 
     print("PASS: PCR[8] matches expected baseline")
+
+    if args.ima_log:
+        check_required_file(args.ima_log)
+        replayed_pcr10, count = replay_ima_log(args.ima_log, target_pcr=10, hash_alg=args.hash_alg)
+        print(f"Replayed {count} events from IMA log. Calculated PCR[10]: {replayed_pcr10}")
+
+        if args.pcr10_text:
+            check_required_file(args.pcr10_text)
+            observed_pcr10 = parse_pcr_value(args.pcr10_text)
+            if replayed_pcr10 != observed_pcr10:
+                print("FAIL: IMA log replay mismatch with observed PCR[10]")
+                print(f"Replayed from log: {replayed_pcr10}")
+                print(f"Observed in PCR:   {observed_pcr10}")
+                return 1
+            print("PASS: IMA log replay matches observed PCR[10]")
+
+        if args.expected_pcr10:
+            check_required_file(args.expected_pcr10)
+            expected_pcr10 = normalize_hex(read_text(args.expected_pcr10))
+            if replayed_pcr10 != expected_pcr10:
+                print("FAIL: IMA PCR[10] baseline mismatch")
+                print(f"Expected: {expected_pcr10}")
+                print(f"Replayed: {replayed_pcr10}")
+                return 1
+            print("PASS: IMA PCR[10] matches expected baseline")
+
     print("PASS: attestation accepted")
     return 0
 
