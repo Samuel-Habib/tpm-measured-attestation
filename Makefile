@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: help start-tpm stop-tpm run-qemu verify-clean verify-tampered verify-ima
+.PHONY: help start-tpm stop-tpm run-qemu verify-clean verify-tampered verify-ima test-all test-offline
 
 help:
 	@echo "Targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  make verify-clean    Verify results/clean against results/expected_pcr8.txt"
 	@echo "  make verify-tampered Verify results/tampered against results/expected_pcr8.txt"
 	@echo "  make verify-ima      Verify results/clean quote and replay IMA measurement log"
+	@echo "  make test-all        Run full automated test suite (clean, tampered, replay, IMA, sealed storage)"
 
 start-tpm:
 	./scripts/start-swtpm.sh
@@ -52,3 +53,8 @@ verify-ima:
 	  --ima-log results/clean/ima_measurements.txt \
 	  --pcr10-text results/clean/pcr10.txt \
 	  --expected-pcr10 results/expected_pcr10.txt
+
+test-all:
+	./scripts/test-offline.sh
+
+test-offline: test-all

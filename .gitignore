@@ -4,7 +4,10 @@ sstate-cache/
 bitbake-builds/
 backups/
 tpm-state/
-results/
+# results/
+!results/
+!results/**
 *.log
 *.tmp
 .DS_Store
+
